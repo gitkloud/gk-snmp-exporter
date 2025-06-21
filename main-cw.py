@@ -1,17 +1,17 @@
 import boto3
 import json
-import gzip
-from io import BytesIO
+import time
 from flask import Flask, Response
 from prometheus_client import generate_latest, Gauge
+from pysnmp.entity import engine, config
+from pysnmp.entity.rfc3413 import cmdrsp
 
 # AWS Configuration
 REGION = "us-east-1"
-BUCKET_NAME = "loki-logs-bpantala-975049893517-us-east-1"
-PREFIX = "/"
+LOG_GROUP = "/gitkloud/default/vpc-flow-logs"
 
 # Initialize AWS Clients
-s3_client = boto3.client("s3", region_name=REGION)
+logs_client = boto3.client("logs", region_name="us-east-1")
 
 # Metrics Definitions
 TOTAL_BYTES = Gauge("vpc_total_bytes", "Total bytes transferred in VPC Flow Logs")
@@ -21,25 +21,25 @@ REJECTED_PACKETS = Gauge("vpc_rejected_packets", "Total rejected packets in VPC 
 app = Flask(__name__)
 
 def fetch_flow_logs():
-    """Fetch latest AWS VPC Flow Logs from S3 and update metrics."""
-    response = s3_client.list_objects_v2(Bucket=BUCKET_NAME, Prefix=PREFIX)
+    """Fetch latest AWS VPC Flow Logs and update metrics."""
+    response = logs_client.describe_log_streams(
+        logGroupName=LOG_GROUP, orderBy="LastEventTime", descending=True, limit=1
+    )
     
-    if "Contents" not in response or not response["Contents"]:
+    if "logStreams" not in response or not response["logStreams"]:
         return
     
-    latest_object = max(response["Contents"], key=lambda obj: obj["LastModified"])
-    s3_object = s3_client.get_object(Bucket=BUCKET_NAME, Key=latest_object["Key"])
-    
-    # Decompress the gzipped log file
-    with gzip.GzipFile(fileobj=BytesIO(s3_object["Body"].read())) as gz:
-        log_data = gz.read().decode("utf-8")
+    log_stream_name = response["logStreams"][0]["logStreamName"]
+    log_events = logs_client.get_log_events(
+        logGroupName=LOG_GROUP, logStreamName=log_stream_name, limit=50
+    )
     
     total_bytes = 0
     rejected_packets = 0
     
-    for line in log_data.splitlines():
+    for event in log_events["events"]:
         try:
-            fields = line.split()
+            fields = event["message"].split()
             total_bytes += int(fields[9])  # bytes transferred
             if fields[11] == "REJECT":
                 rejected_packets += 1
